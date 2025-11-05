@@ -1,11 +1,102 @@
 pipeline {
   agent any
+
+  parameters {
+    booleanParam(name: 'PUSH_TO_GHCR', defaultValue: false, description: 'Push image to GHCR')
+    booleanParam(name: 'DEPLOY_LOCAL_DOCKER', defaultValue: true, description: 'Deploy on this box via Docker Compose')
+  }
+
+  environment {
+    ORG_OR_USER = "YOUR_ORG"             // set if you later push to GHCR
+    IMAGE_NAME  = "ghcr.io/${ORG_OR_USER}/flask-todos"
+    IMAGE_TAG   = "${env.GIT_COMMIT}"
+  }
+
+  options { timestamps() }
+
   stages {
-    stage('Hello') {
+    stage('Checkout') {
+      steps { checkout scm }
+    }
+
+    stage('Install Python deps for tests') {
       steps {
-        sh 'echo "Jenkinsfile found. Pipeline is alive!"'
+        dir('flask-todos') {
+          sh """
+            python3 -V || (sudo apt-get update && sudo apt-get install -y python3 python3-pip)
+            python3 -m pip install --upgrade pip
+            pip install -r requirements.txt
+          """
+        }
       }
     }
+
+    stage('Start CI Postgres (for tests)') {
+      steps {
+        sh """
+          docker rm -f ci-pg || true
+          docker run -d --name ci-pg -p 5432:5432 \
+            -e POSTGRES_USER=ci -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=todos_test \
+            --health-cmd='pg_isready -U ci -d todos_test' \
+            --health-interval=5s --health-retries=20 \
+            postgres:16
+        """
+      }
+    }
+
+    stage('Run unit + integration tests') {
+      steps {
+        dir('flask-todos') {
+          sh """
+            for i in {1..30}; do
+              docker exec ci-pg pg_isready -U ci -d todos_test && break
+              echo 'waiting for postgres...'; sleep 2
+            done
+            DATABASE_URL='postgresql://ci:ci@127.0.0.1:5432/todos_test' pytest -q
+          """
+        }
+      }
+      post {
+        always { sh 'docker rm -f ci-pg || true' }
+      }
+    }
+
+    stage('Build Docker image') {
+      steps {
+        dir('flask-todos') {
+          sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -t ${IMAGE_NAME}:latest ."
+        }
+      }
+    }
+
+    stage('Push to GHCR') {
+      when { expression { return params.PUSH_TO_GHCR } }
+      environment { GHCR_PAT = credentials('GHCR_TOKEN') }
+      steps {
+        sh """
+          echo "${GHCR_PAT}" | docker login ghcr.io -u ${env.GIT_AUTHOR_NAME ?: 'gh-user'} --password-stdin
+          docker push ${IMAGE_NAME}:${IMAGE_TAG}
+          docker push ${IMAGE_NAME}:latest
+        """
+      }
+    }
+
+    stage('Deploy locally (Docker Compose)') {
+      when { expression { return params.DEPLOY_LOCAL_DOCKER } }
+      steps {
+        sh """
+          export IMAGE_TAG=${IMAGE_TAG}
+          cd /opt/todos
+          docker compose -f docker-compose.prod.yml pull app || true
+          docker compose -f docker-compose.prod.yml up -d --remove-orphans
+          docker compose -f docker-compose.prod.yml ps
+        """
+      }
+    }
+  }
+
+  post {
+    success { echo "Deployed image tag: ${IMAGE_TAG}" }
   }
 }
 
