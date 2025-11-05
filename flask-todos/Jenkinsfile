@@ -3,11 +3,11 @@ pipeline {
 
   parameters {
     booleanParam(name: 'PUSH_TO_GHCR', defaultValue: false, description: 'Push image to GHCR')
-    booleanParam(name: 'DEPLOY_LOCAL_DOCKER', defaultValue: true, description: 'Deploy on this box via Docker Compose')
+    booleanParam(name: 'DEPLOY_LOCAL_DOCKER', defaultValue: true, description: 'Deploy locally via Docker Compose')
   }
 
   environment {
-    ORG_OR_USER = "YOUR_ORG"             // set if you later push to GHCR
+    ORG_OR_USER = "YOUR_ORG"             // replace if you plan to push to GHCR
     IMAGE_NAME  = "ghcr.io/${ORG_OR_USER}/flask-todos"
     IMAGE_TAG   = "${env.GIT_COMMIT}"
   }
@@ -35,9 +35,10 @@ pipeline {
       steps {
         sh """
           docker rm -f ci-pg || true
-          docker run -d --name ci-pg -p 5432:5432 \
+          # Run Postgres test DB on host port 55432 to avoid conflicts
+          docker run -d --name ci-pg -p 55432:5432 \
             -e POSTGRES_USER=ci -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=todos_test \
-            --health-cmd='pg_isready -U ci -d todos_test' \
+            --health-cmd "pg_isready -U ci -d todos_test" \
             --health-interval=5s --health-retries=20 \
             postgres:16
         """
@@ -52,7 +53,7 @@ pipeline {
               docker exec ci-pg pg_isready -U ci -d todos_test && break
               echo 'waiting for postgres...'; sleep 2
             done
-            DATABASE_URL='postgresql://ci:ci@127.0.0.1:5432/todos_test' pytest -q
+            DATABASE_URL='postgresql://ci:ci@127.0.0.1:55432/todos_test' pytest -q
           """
         }
       }
@@ -64,7 +65,9 @@ pipeline {
     stage('Build Docker image') {
       steps {
         dir('flask-todos') {
-          sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -t ${IMAGE_NAME}:latest ."
+          sh """
+            docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -t ${IMAGE_NAME}:latest .
+          """
         }
       }
     }
@@ -99,4 +102,3 @@ pipeline {
     success { echo "Deployed image tag: ${IMAGE_TAG}" }
   }
 }
-
