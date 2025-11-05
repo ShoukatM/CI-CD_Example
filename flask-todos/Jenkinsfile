@@ -22,24 +22,22 @@ pipeline {
     stage('Install Python deps (venv)') {
       steps {
         dir('flask-todos') {
-          sh """
-            # Ensure venv module exists (first run on a fresh box)
+          sh '''
             sudo apt-get update -y
             sudo apt-get install -y python3-venv
 
-            # Create & use isolated virtualenv
             python3 -m venv .venv
             . .venv/bin/activate
             python -m pip install --upgrade pip
             pip install -r requirements.txt
-          """
+          '''
         }
       }
     }
 
     stage('Start CI Postgres (for tests)') {
       steps {
-        sh """
+        sh '''
           docker rm -f ci-pg || true
           docker run -d --name ci-pg -p 55432:5432 \
             -e POSTGRES_USER=ci -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=todos_test \
@@ -49,7 +47,7 @@ pipeline {
 
           # Wait for container health=healthy (max ~60s)
           for i in {1..30}; do
-            STATE=$(docker inspect -f '{{.State.Health.Status}}' ci-pg || echo starting)
+            STATE=$(docker inspect -f "{{.State.Health.Status}}" ci-pg 2>/dev/null || echo starting)
             if [ "$STATE" = "healthy" ]; then
               echo "Postgres is healthy."
               break
@@ -57,18 +55,18 @@ pipeline {
             echo "Waiting for Postgres (state=$STATE)..."
             sleep 2
           done
-        """
+        '''
       }
     }
 
     stage('Run unit + integration tests') {
       steps {
         dir('flask-todos') {
-          sh """
+          sh '''
             . .venv/bin/activate
-            export DATABASE_URL='postgresql://ci:ci@127.0.0.1:55432/todos_test'
+            export DATABASE_URL="postgresql://ci:ci@127.0.0.1:55432/todos_test"
             python -m pytest -q
-          """
+          '''
         }
       }
       post {
@@ -99,13 +97,13 @@ pipeline {
     stage('Deploy locally (Docker Compose)') {
       when { expression { return params.DEPLOY_LOCAL_DOCKER } }
       steps {
-        sh """
-          export IMAGE_TAG=${IMAGE_TAG}
+        sh '''
+          export IMAGE_TAG='"'"${IMAGE_TAG}"'"'  # pass through exact tag value
           cd /opt/todos
           docker compose -f docker-compose.prod.yml pull app || true
           docker compose -f docker-compose.prod.yml up -d --remove-orphans
           docker compose -f docker-compose.prod.yml ps
-        """
+        '''
       }
     }
   }
