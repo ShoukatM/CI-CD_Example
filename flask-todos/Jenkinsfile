@@ -23,9 +23,7 @@ pipeline {
       steps {
         dir('flask-todos') {
           sh '''
-            sudo apt-get update -y
-            sudo apt-get install -y python3-venv
-
+            # Create & use isolated virtualenv (python3-venv must be installed once on the host)
             python3 -m venv .venv
             . .venv/bin/activate
             python -m pip install --upgrade pip
@@ -98,7 +96,8 @@ pipeline {
       when { expression { return params.DEPLOY_LOCAL_DOCKER } }
       steps {
         sh '''
-          export IMAGE_TAG='"'"${IMAGE_TAG}"'"'  # pass through exact tag value
+          # Pass the Jenkins env IMAGE_TAG through to Compose
+          export IMAGE_TAG=$IMAGE_TAG
           cd /opt/todos
           docker compose -f docker-compose.prod.yml pull app || true
           docker compose -f docker-compose.prod.yml up -d --remove-orphans
