@@ -1,29 +1,21 @@
 pipeline {
   agent any
-
   parameters {
-    booleanParam(name: 'PUSH_TO_GHCR', defaultValue: false, description: 'Push image to GHCR')
     booleanParam(name: 'DEPLOY_LOCAL_DOCKER', defaultValue: true, description: 'Deploy locally via Docker Compose')
   }
-
   environment {
-    ORG_OR_USER = "YOUR_ORG"             // set if you plan to push to GHCR
-    IMAGE_NAME  = "ghcr.io/${ORG_OR_USER}/flask-todos"
+    IMAGE_NAME  = "flask-todos"              // local image name (lowercase)
     IMAGE_TAG   = "${env.GIT_COMMIT}"
   }
-
   options { timestamps() }
 
   stages {
-    stage('Checkout') {
-      steps { checkout scm }
-    }
+    stage('Checkout'){ steps { checkout scm } }
 
-    stage('Install Python deps (venv)') {
+    stage('Install Python deps (venv)'){
       steps {
-        dir('flask-todos') {
+        dir('flask-todos'){
           sh '''
-            # Create & use isolated virtualenv (python3-venv must be installed once on the host)
             python3 -m venv .venv
             . .venv/bin/activate
             python -m pip install --upgrade pip
@@ -33,7 +25,7 @@ pipeline {
       }
     }
 
-    stage('Start CI Postgres (for tests)') {
+    stage('Start CI Postgres (for tests)'){
       steps {
         sh '''
           docker rm -f ci-pg || true
@@ -43,23 +35,18 @@ pipeline {
             --health-interval=5s --health-retries=20 \
             postgres:16
 
-          # Wait for container health=healthy (max ~60s)
           for i in {1..30}; do
             STATE=$(docker inspect -f "{{.State.Health.Status}}" ci-pg 2>/dev/null || echo starting)
-            if [ "$STATE" = "healthy" ]; then
-              echo "Postgres is healthy."
-              break
-            fi
-            echo "Waiting for Postgres (state=$STATE)..."
-            sleep 2
+            [ "$STATE" = "healthy" ] && echo "Postgres is healthy." && break
+            echo "Waiting for Postgres (state=$STATE)..."; sleep 2
           done
         '''
       }
     }
 
-    stage('Run unit + integration tests') {
+    stage('Run unit + integration tests'){
       steps {
-        dir('flask-todos') {
+        dir('flask-todos'){
           sh '''
             . .venv/bin/activate
             export DATABASE_URL="postgresql://ci:ci@127.0.0.1:55432/todos_test"
@@ -67,39 +54,23 @@ pipeline {
           '''
         }
       }
-      post {
-        always { sh 'docker rm -f ci-pg || true' }
-      }
+      post { always { sh 'docker rm -f ci-pg || true' } }
     }
 
-    stage('Build Docker image') {
+    stage('Build Docker image'){
       steps {
-        dir('flask-todos') {
-          sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -t ${IMAGE_NAME}:latest ."
+        dir('flask-todos'){
+          sh 'docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -t ${IMAGE_NAME}:latest .'
         }
       }
     }
 
-    stage('Push to GHCR') {
-      when { expression { return params.PUSH_TO_GHCR } }
-      environment { GHCR_PAT = credentials('GHCR_TOKEN') }
-      steps {
-        sh """
-          echo "${GHCR_PAT}" | docker login ghcr.io -u ${env.GIT_AUTHOR_NAME ?: 'gh-user'} --password-stdin
-          docker push ${IMAGE_NAME}:${IMAGE_TAG}
-          docker push ${IMAGE_NAME}:latest
-        """
-      }
-    }
-
-    stage('Deploy locally (Docker Compose)') {
+    stage('Deploy locally (Docker Compose)'){
       when { expression { return params.DEPLOY_LOCAL_DOCKER } }
       steps {
         sh '''
-          # Pass the Jenkins env IMAGE_TAG through to Compose
           export IMAGE_TAG=$IMAGE_TAG
           cd /opt/todos
-          docker compose -f docker-compose.prod.yml pull app || true
           docker compose -f docker-compose.prod.yml up -d --remove-orphans
           docker compose -f docker-compose.prod.yml ps
         '''
@@ -108,7 +79,7 @@ pipeline {
   }
 
   post {
-    success { echo "✅ Deployed image tag: ${IMAGE_TAG}" }
-    always  { sh 'docker images --format "{{.Repository}}:{{.Tag}}  {{.CreatedSince}}" | head -n 15 || true' }
+    success { echo "✅ Deployed image: ${IMAGE_NAME}:${IMAGE_TAG}" }
+    always { sh 'docker images --format "{{.Repository}}:{{.Tag}}  {{.CreatedSince}}" | head -n 15 || true' }
   }
 }
