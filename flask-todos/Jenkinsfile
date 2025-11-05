@@ -7,7 +7,7 @@ pipeline {
   }
 
   environment {
-    ORG_OR_USER = "YOUR_ORG"             // replace if you plan to push to GHCR
+    ORG_OR_USER = "YOUR_ORG"             // set if you plan to push to GHCR
     IMAGE_NAME  = "ghcr.io/${ORG_OR_USER}/flask-todos"
     IMAGE_TAG   = "${env.GIT_COMMIT}"
   }
@@ -19,12 +19,18 @@ pipeline {
       steps { checkout scm }
     }
 
-    stage('Install Python deps for tests') {
+    stage('Install Python deps (venv)') {
       steps {
         dir('flask-todos') {
           sh """
-            python3 -V || (sudo apt-get update && sudo apt-get install -y python3 python3-pip)
-            python3 -m pip install --upgrade pip
+            # Ensure venv module exists (first run on a fresh box)
+            sudo apt-get update -y
+            sudo apt-get install -y python3-venv
+
+            # Create & use isolated virtualenv
+            python3 -m venv .venv
+            . .venv/bin/activate
+            python -m pip install --upgrade pip
             pip install -r requirements.txt
           """
         }
@@ -35,12 +41,22 @@ pipeline {
       steps {
         sh """
           docker rm -f ci-pg || true
-          # Run Postgres test DB on host port 55432 to avoid conflicts
           docker run -d --name ci-pg -p 55432:5432 \
             -e POSTGRES_USER=ci -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=todos_test \
-            --health-cmd "pg_isready -U ci -d todos_test" \
+            --health-cmd="pg_isready -U ci -d todos_test" \
             --health-interval=5s --health-retries=20 \
             postgres:16
+
+          # Wait for container health=healthy (max ~60s)
+          for i in {1..30}; do
+            STATE=$(docker inspect -f '{{.State.Health.Status}}' ci-pg || echo starting)
+            if [ "$STATE" = "healthy" ]; then
+              echo "Postgres is healthy."
+              break
+            fi
+            echo "Waiting for Postgres (state=$STATE)..."
+            sleep 2
+          done
         """
       }
     }
@@ -49,11 +65,9 @@ pipeline {
       steps {
         dir('flask-todos') {
           sh """
-            for i in {1..30}; do
-              docker exec ci-pg pg_isready -U ci -d todos_test && break
-              echo 'waiting for postgres...'; sleep 2
-            done
-            DATABASE_URL='postgresql://ci:ci@127.0.0.1:55432/todos_test' pytest -q
+            . .venv/bin/activate
+            export DATABASE_URL='postgresql://ci:ci@127.0.0.1:55432/todos_test'
+            python -m pytest -q
           """
         }
       }
@@ -65,9 +79,7 @@ pipeline {
     stage('Build Docker image') {
       steps {
         dir('flask-todos') {
-          sh """
-            docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -t ${IMAGE_NAME}:latest .
-          """
+          sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -t ${IMAGE_NAME}:latest ."
         }
       }
     }
@@ -99,6 +111,7 @@ pipeline {
   }
 
   post {
-    success { echo "Deployed image tag: ${IMAGE_TAG}" }
+    success { echo "✅ Deployed image tag: ${IMAGE_TAG}" }
+    always  { sh 'docker images --format "{{.Repository}}:{{.Tag}}  {{.CreatedSince}}" | head -n 15 || true' }
   }
 }
